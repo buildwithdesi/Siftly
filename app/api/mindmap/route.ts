@@ -170,7 +170,7 @@ async function getCategoryTweetNodes(categorySlug: string): Promise<MindMapRespo
         text: truncatedText,
         authorHandle: bookmark.authorHandle,
         authorName: bookmark.authorName,
-        tweetUrl: `https://twitter.com/${bookmark.authorHandle}/status/${bookmark.tweetId}`,
+        tweetUrl: `https://x.com/i/web/status/${bookmark.tweetId}`,
         thumbnailUrl,
         hasMedia: firstMedia !== null,
         mediaType: firstMedia?.type ?? null,

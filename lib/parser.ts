@@ -4,6 +4,11 @@ export interface ParsedMedia {
   thumbnailUrl?: string
 }
 
+export interface ParsedMention {
+  handle: string
+  name: string
+}
+
 export interface ParsedBookmark {
   tweetId: string
   text: string
@@ -12,6 +17,7 @@ export interface ParsedBookmark {
   tweetCreatedAt: Date | null
   hashtags: string[]
   urls: string[]
+  mentions: ParsedMention[]
   media: ParsedMedia[]
   rawJson: string
 }
@@ -40,10 +46,16 @@ interface TwitterHashtagEntity {
   text?: string
 }
 
+interface TwitterMentionEntity {
+  screen_name?: string
+  name?: string
+}
+
 interface TwitterEntities {
   hashtags?: TwitterHashtagEntity[]
   urls?: TwitterUrlEntity[]
   media?: TwitterMediaEntity[]
+  user_mentions?: TwitterMentionEntity[]
 }
 
 interface TwitterUser {
@@ -72,6 +84,12 @@ function extractTweetId(tweet: RawTweet): string | null {
 }
 
 function extractText(tweet: RawTweet): string {
+  // Long-form tweets store full text in note_tweet
+  const noteTweet = (tweet as Record<string, unknown>).note_tweet as
+    { note_tweet_results?: { result?: { text?: string } } } | undefined
+  if (noteTweet?.note_tweet_results?.result?.text) {
+    return noteTweet.note_tweet_results.result.text
+  }
   return tweet.full_text ?? tweet.text ?? ''
 }
 
@@ -94,6 +112,13 @@ function extractHashtags(tweet: RawTweet): string[] {
   return tags
     .map((h) => h.text ?? '')
     .filter((t) => t.length > 0)
+}
+
+function extractMentions(tweet: RawTweet): ParsedMention[] {
+  const mentions = tweet.entities?.user_mentions ?? []
+  return mentions
+    .map((m) => ({ handle: m.screen_name ?? '', name: m.name ?? '' }))
+    .filter((m) => m.handle.length > 0)
 }
 
 function extractUrls(tweet: RawTweet): string[] {
@@ -156,6 +181,7 @@ function parseSingleTweet(tweet: RawTweet): ParsedBookmark | null {
     tweetCreatedAt: extractCreatedAt(tweet),
     hashtags: extractHashtags(tweet),
     urls: extractUrls(tweet),
+    mentions: extractMentions(tweet),
     media: extractMedia(tweet),
     rawJson: JSON.stringify(tweet),
   }
@@ -211,6 +237,7 @@ interface ConsoleExportBookmark {
   timestamp?: string
   text?: string
   media?: { type?: string; url?: string }[]
+  mentions?: { handle?: string; name?: string }[]
   hashtags?: string[]
   urls?: string[]
 }
@@ -245,6 +272,7 @@ function convertConsoleExportRow(row: ConsoleExportBookmark): RawTweet {
     entities: {
       hashtags: (row.hashtags ?? []).map((h) => ({ text: h })),
       urls: (row.urls ?? []).map((u) => ({ expanded_url: u })),
+      user_mentions: (row.mentions ?? []).map((m) => ({ screen_name: m.handle, name: m.name })),
       media: mediaEntities.length > 0 ? mediaEntities : undefined,
     },
     extended_entities: mediaEntities.length > 0 ? { media: mediaEntities } : undefined,

@@ -92,7 +92,7 @@ export default function CommandPalette() {
   }
 
   function openBookmarkUrl(b: BookmarkWithMedia) {
-    const url = `https://twitter.com/${b.authorHandle}/status/${b.tweetId}`
+    const url = `https://x.com/i/web/status/${b.tweetId}`
     window.open(url, '_blank', 'noopener noreferrer')
     setOpen(false)
   }

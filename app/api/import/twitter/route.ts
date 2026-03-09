@@ -232,6 +232,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
   let imported = 0
   let skipped = 0
+  let updated = 0
   let cursor: string | undefined
 
   try {
@@ -242,25 +243,43 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       for (const tweet of tweets) {
         if (!tweet.rest_id) continue
 
-        const exists = await prisma.bookmark.findUnique({
+        const media = extractMedia(tweet)
+        const coreResult = tweet.core?.user_results?.result ?? {} as Record<string, unknown>
+        const userLegacy = (coreResult as Record<string, unknown>).legacy as Record<string, unknown> ?? coreResult
+        const screenName = (userLegacy.screen_name as string) ?? (coreResult as Record<string, unknown>).screen_name as string ?? 'unknown'
+        const displayName = (userLegacy.name as string) ?? 'Unknown'
+        const newText = tweetFullText(tweet)
+
+        const existing = await prisma.bookmark.findUnique({
           where: { tweetId: tweet.rest_id },
-          select: { id: true },
+          select: { id: true, text: true, authorHandle: true },
         })
 
-        if (exists) {
-          skipped++
+        if (existing) {
+          const shouldUpdateText = newText.length > (existing.text?.length ?? 0)
+          const shouldUpdateAuthor = existing.authorHandle === 'unknown' && screenName !== 'unknown'
+
+          if (shouldUpdateText || shouldUpdateAuthor) {
+            await prisma.bookmark.update({
+              where: { id: existing.id },
+              data: {
+                ...(shouldUpdateText ? { text: newText, rawJson: JSON.stringify(tweet) } : {}),
+                ...(shouldUpdateAuthor ? { authorHandle: screenName, authorName: displayName } : {}),
+              },
+            })
+            updated++
+          } else {
+            skipped++
+          }
           continue
         }
-
-        const media = extractMedia(tweet)
-        const userLegacy = tweet.core?.user_results?.result?.legacy ?? {}
 
         const created = await prisma.bookmark.create({
           data: {
             tweetId: tweet.rest_id,
-            text: tweetFullText(tweet),
-            authorHandle: userLegacy.screen_name ?? 'unknown',
-            authorName: userLegacy.name ?? 'Unknown',
+            text: newText,
+            authorHandle: screenName,
+            authorName: displayName,
             tweetCreatedAt: tweet.legacy?.created_at
               ? new Date(tweet.legacy.created_at)
               : null,
@@ -293,5 +312,5 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     )
   }
 
-  return NextResponse.json({ imported, skipped })
+  return NextResponse.json({ imported, skipped, updated })
 }

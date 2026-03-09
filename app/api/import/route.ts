@@ -73,16 +73,32 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
   let importedCount = 0
   let skippedCount = 0
+  let updatedCount = 0
 
   for (const bookmark of parsedBookmarks) {
     try {
       const existing = await prisma.bookmark.findUnique({
         where: { tweetId: bookmark.tweetId },
-        select: { id: true },
+        select: { id: true, text: true, authorHandle: true },
       })
 
       if (existing) {
-        skippedCount++
+        // Update if new text is longer or author was unknown
+        const shouldUpdateText = bookmark.text.length > (existing.text?.length ?? 0)
+        const shouldUpdateAuthor = existing.authorHandle === 'unknown' && bookmark.authorHandle !== 'unknown'
+
+        if (shouldUpdateText || shouldUpdateAuthor) {
+          await prisma.bookmark.update({
+            where: { id: existing.id },
+            data: {
+              ...(shouldUpdateText ? { text: bookmark.text, rawJson: bookmark.rawJson } : {}),
+              ...(shouldUpdateAuthor ? { authorHandle: bookmark.authorHandle, authorName: bookmark.authorName } : {}),
+            },
+          })
+          updatedCount++
+        } else {
+          skippedCount++
+        }
         continue
       }
 
@@ -128,5 +144,6 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     jobId: importJob.id,
     count: importedCount,
     skipped: skippedCount,
+    updated: updatedCount,
   })
 }

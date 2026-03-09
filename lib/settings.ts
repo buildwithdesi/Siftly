@@ -10,7 +10,7 @@ let _modelCacheExpiry = 0
 export async function getAnthropicModel(): Promise<string> {
   if (_cachedModel && Date.now() < _modelCacheExpiry) return _cachedModel
   const setting = await prisma.setting.findUnique({ where: { key: 'anthropicModel' } })
-  _cachedModel = setting?.value ?? 'claude-opus-4-6'
+  _cachedModel = setting?.value ?? 'claude-haiku-4-5-20251001'
   _modelCacheExpiry = Date.now() + 5 * 60 * 1000
   return _cachedModel
 }

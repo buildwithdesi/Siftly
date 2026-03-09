@@ -12,6 +12,7 @@ import {
   GitBranch,
   Settings,
   Sparkles,
+  Download,
   ChevronRight,
   Command,
   Bookmark,
@@ -32,6 +33,7 @@ const NAV_ITEMS: NavItem[] = [
   { href: '/bookmarks', label: 'Browse', icon: Search },
   { href: '/mindmap', label: 'Mindmap', icon: GitBranch },
   { href: '/import', label: 'Import', icon: Upload },
+  { href: '/export', label: 'Export', icon: Download },
   { href: '/settings', label: 'Settings', icon: Settings },
 ]
 

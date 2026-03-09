@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { exportAllBookmarksCsv, exportBookmarksJson, exportCategoryAsZip } from '@/lib/exporter'
+import { exportAllBookmarksCsv, exportBookmarksJson, exportCategoryAsZip, exportBookmarksHtml, exportBookmarksAnalyzedHtml } from '@/lib/exporter'
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
   const { searchParams } = new URL(request.url)
@@ -91,7 +91,96 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   }
 
   return NextResponse.json(
-    { error: `Unknown export type: ${type}. Use csv, json, or zip.` },
+    { error: `Unknown export type: ${type}. Use csv, json, zip, or html.` },
+    { status: 400 }
+  )
+}
+
+export async function POST(request: NextRequest): Promise<NextResponse> {
+  let body: { type?: string; bookmarkIds?: string[]; title?: string }
+  try {
+    body = await request.json()
+  } catch {
+    return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 })
+  }
+
+  const { type, bookmarkIds, title } = body
+
+  if (!type) {
+    return NextResponse.json(
+      { error: 'Missing required field: type (csv | json | html)' },
+      { status: 400 }
+    )
+  }
+
+  const ids = bookmarkIds && bookmarkIds.length > 0 ? bookmarkIds : undefined
+
+  if (type === 'csv') {
+    try {
+      const csv = await exportAllBookmarksCsv()
+      return new NextResponse(csv, {
+        status: 200,
+        headers: {
+          'Content-Type': 'text/csv; charset=utf-8',
+          'Content-Disposition': 'attachment; filename="siftly-bookmarks.csv"',
+        },
+      })
+    } catch (err) {
+      console.error('CSV export error:', err)
+      return NextResponse.json({ error: 'An error occurred' }, { status: 500 })
+    }
+  }
+
+  if (type === 'json') {
+    try {
+      const json = await exportBookmarksJson(ids)
+      return new NextResponse(json, {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Content-Disposition': 'attachment; filename="siftly-bookmarks.json"',
+        },
+      })
+    } catch (err) {
+      console.error('JSON export error:', err)
+      return NextResponse.json({ error: 'An error occurred' }, { status: 500 })
+    }
+  }
+
+  if (type === 'html') {
+    try {
+      const html = await exportBookmarksHtml(ids, title)
+      return new NextResponse(html, {
+        status: 200,
+        headers: {
+          'Content-Type': 'text/html; charset=utf-8',
+          'Content-Disposition': 'attachment; filename="siftly-bookmarks.html"',
+        },
+      })
+    } catch (err) {
+      console.error('HTML export error:', err)
+      return NextResponse.json({ error: 'An error occurred' }, { status: 500 })
+    }
+  }
+
+  if (type === 'html-analyzed') {
+    try {
+      const html = await exportBookmarksAnalyzedHtml(ids, title)
+      return new NextResponse(html, {
+        status: 200,
+        headers: {
+          'Content-Type': 'text/html; charset=utf-8',
+          'Content-Disposition': 'attachment; filename="siftly-bookmarks-analyzed.html"',
+        },
+      })
+    } catch (err) {
+      console.error('Analyzed HTML export error:', err)
+      return NextResponse.json({ error: 'An error occurred' }, { status: 500 })
+    }
+  }
+
+  return NextResponse.json(
+    { error: `Unknown export type: ${type}. Use csv, json, html, or html-analyzed.` },
     { status: 400 }
   )
 }

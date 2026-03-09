@@ -11,6 +11,7 @@ type Method = 'bookmarklet' | 'console' | 'live'
 interface ImportResult {
   imported: number
   skipped: number
+  updated: number
   total: number
 }
 
@@ -91,7 +92,10 @@ const BOOKMARKLET_SCRIPT = `(async function(){
   function addTweet(t){
     if(!t||!t.rest_id||seen.has(t.rest_id))return;
     seen.add(t.rest_id);
-    var leg=t.legacy||{},usr=(t.core&&t.core.user_results&&t.core.user_results.result&&t.core.user_results.result.legacy)||{};
+    var leg=t.legacy||{};
+    var coreRes=t.core&&t.core.user_results&&t.core.user_results.result||{};
+    var usr=coreRes.legacy||coreRes||{};
+    if(!usr.screen_name&&coreRes.rest_id){usr.screen_name=coreRes.screen_name||coreRes.rest_id;}
     var rawMedia=(leg.extended_entities&&leg.extended_entities.media)||(leg.entities&&leg.entities.media)||[];
     var media=rawMedia.map(function(m){
       var thumb=m.media_url_https||'';
@@ -99,15 +103,15 @@ const BOOKMARKLET_SCRIPT = `(async function(){
         var variants=m.video_info&&m.video_info.variants||[];
         var mp4s=variants.filter(function(v){return v.content_type==='video/mp4'&&v.url;}).sort(function(a,b){return(b.bitrate||0)-(a.bitrate||0);});
         if(mp4s.length)return{type:m.type==='animated_gif'?'gif':'video',url:mp4s[0].url};
-        // No mp4 — degrade to photo so thumbnail shows correctly (actual video not available)
         if(thumb)return{type:'photo',url:thumb};
         return null;
       }
       return thumb?{type:'photo',url:thumb}:null;
     }).filter(Boolean);
+    var mentions=(leg.entities&&leg.entities.user_mentions||[]).map(function(u){return{handle:u.screen_name||'',name:u.name||''};}).filter(function(u){return u.handle;});
     all.push({id:t.rest_id,author:usr.name||'Unknown',handle:'@'+(usr.screen_name||'unknown'),
       avatar:usr.profile_image_url_https||'',timestamp:leg.created_at||'',
-      text:leg.full_text||leg.text||'',media:media,
+      text:(t.note_tweet&&t.note_tweet.note_tweet_results&&t.note_tweet.note_tweet_results.result&&t.note_tweet.note_tweet_results.result.text)||leg.full_text||leg.text||'',media:media,mentions:mentions,
       hashtags:(leg.entities&&leg.entities.hashtags||[]).map(function(h){return h.text;}),
       urls:(leg.entities&&leg.entities.urls||[]).map(function(u){return u.expanded_url;}).filter(Boolean)});
     btn.textContent='Export '+all.length+' '+label+' \u2192';
@@ -221,21 +225,24 @@ const CONSOLE_SCRIPT = `(async function() {
   function addTweet(t) {
     if (!t?.rest_id || seen.has(t.rest_id)) return;
     seen.add(t.rest_id);
-    const leg = t.legacy ?? {}, usr = t.core?.user_results?.result?.legacy ?? {};
+    const leg = t.legacy ?? {};
+    const coreRes = t.core?.user_results?.result ?? {};
+    const usr = coreRes.legacy ?? coreRes;
+    if (!usr.screen_name && coreRes.rest_id) usr.screen_name = coreRes.screen_name ?? coreRes.rest_id;
     const media = (leg.extended_entities?.media ?? leg.entities?.media ?? []).map(m => {
       const thumb = m.media_url_https ?? '';
       if (m.type === 'video' || m.type === 'animated_gif') {
         const mp4s = (m.video_info?.variants ?? []).filter(v => v.content_type === 'video/mp4' && v.url)
           .sort((a, b) => (b.bitrate ?? 0) - (a.bitrate ?? 0));
         if (mp4s.length) return { type: m.type === 'animated_gif' ? 'gif' : 'video', url: mp4s[0].url };
-        // No mp4 — degrade to photo so thumbnail shows correctly (actual video not available)
         return thumb ? { type: 'photo', url: thumb } : null;
       }
       return thumb ? { type: 'photo', url: thumb } : null;
     }).filter(Boolean);
+    const mentions = (leg.entities?.user_mentions ?? []).map(u => ({ handle: u.screen_name ?? '', name: u.name ?? '' })).filter(u => u.handle);
     all.push({
       id: t.rest_id, author: usr.name ?? 'Unknown', handle: '@' + (usr.screen_name ?? 'unknown'),
-      timestamp: leg.created_at ?? '', text: leg.full_text ?? leg.text ?? '', media,
+      timestamp: leg.created_at ?? '', text: t.note_tweet?.note_tweet_results?.result?.text ?? leg.full_text ?? leg.text ?? '', media, mentions,
       hashtags: (leg.entities?.hashtags ?? []).map(h => h.text),
       urls: (leg.entities?.urls ?? []).map(u => u.expanded_url).filter(Boolean)
     });
@@ -758,7 +765,8 @@ function LiveImportTab({ onSynced }: { onSynced: (result: ImportResult) => void 
       if (!res.ok) throw new Error(data.error ?? 'Sync failed')
       const imported = data.imported ?? 0
       const skipped = data.skipped ?? 0
-      onSynced({ imported, skipped, total: imported + skipped })
+      const updated = data.updated ?? 0
+      onSynced({ imported, skipped, updated, total: imported + skipped + updated })
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Sync failed')
     } finally {
@@ -983,8 +991,11 @@ function ImportingStep({ result }: {
       <div className="text-center">
         <p className="text-xl font-bold text-zinc-100">Import Complete</p>
         <p className="text-zinc-400 mt-1">
-          <span className="text-emerald-400 font-semibold">{result.imported}</span> imported,{' '}
-          <span className="text-zinc-500">{result.skipped} skipped</span> as duplicates
+          <span className="text-emerald-400 font-semibold">{result.imported}</span> imported
+          {result.updated > 0 && (
+            <>, <span className="text-amber-400 font-semibold">{result.updated}</span> updated</>
+          )}
+          , <span className="text-zinc-500">{result.skipped} skipped</span> as duplicates
         </p>
       </div>
       <div className="flex items-center gap-2 text-indigo-400 text-sm">
@@ -1360,7 +1371,8 @@ export default function ImportPage() {
       const result: ImportResult = {
         imported: data.imported ?? data.count ?? 0,
         skipped: data.skipped ?? 0,
-        total: (data.imported ?? data.count ?? 0) + (data.skipped ?? 0),
+        updated: data.updated ?? 0,
+        total: (data.imported ?? data.count ?? 0) + (data.skipped ?? 0) + (data.updated ?? 0),
       }
       setImportResult(result)
 

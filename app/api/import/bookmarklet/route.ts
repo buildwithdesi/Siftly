@@ -124,6 +124,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
   let imported = 0
   let skipped = 0
+  let updated = 0
 
   for (let tweet of tweets) {
     // Unwrap TweetWithVisibilityResults
@@ -132,25 +133,44 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     }
     if (!tweet.rest_id) continue
 
-    const exists = await prisma.bookmark.findUnique({
+    const coreResult = tweet.core?.user_results?.result ?? {} as Record<string, unknown>
+    const userLegacy = (coreResult as Record<string, unknown>).legacy as Record<string, unknown> ?? coreResult
+    const screenName = (userLegacy.screen_name as string) ?? (coreResult as Record<string, unknown>).screen_name as string ?? 'unknown'
+    const displayName = (userLegacy.name as string) ?? 'Unknown'
+    const newText = tweetFullText(tweet)
+    const media = extractMedia(tweet)
+
+    const existing = await prisma.bookmark.findUnique({
       where: { tweetId: tweet.rest_id },
-      select: { id: true },
+      select: { id: true, text: true, authorHandle: true },
     })
 
-    if (exists) {
-      skipped++
+    if (existing) {
+      // Update if new text is longer or author was unknown
+      const shouldUpdateText = newText.length > (existing.text?.length ?? 0)
+      const shouldUpdateAuthor = existing.authorHandle === 'unknown' && screenName !== 'unknown'
+
+      if (shouldUpdateText || shouldUpdateAuthor) {
+        await prisma.bookmark.update({
+          where: { id: existing.id },
+          data: {
+            ...(shouldUpdateText ? { text: newText, rawJson: JSON.stringify(tweet) } : {}),
+            ...(shouldUpdateAuthor ? { authorHandle: screenName, authorName: displayName } : {}),
+          },
+        })
+        updated++
+      } else {
+        skipped++
+      }
       continue
     }
-
-    const userLegacy = tweet.core?.user_results?.result?.legacy ?? {}
-    const media = extractMedia(tweet)
 
     const created = await prisma.bookmark.create({
       data: {
         tweetId: tweet.rest_id,
-        text: tweetFullText(tweet),
-        authorHandle: userLegacy.screen_name ?? 'unknown',
-        authorName: userLegacy.name ?? 'Unknown',
+        text: newText,
+        authorHandle: screenName,
+        authorName: displayName,
         tweetCreatedAt: tweet.legacy?.created_at
           ? new Date(tweet.legacy.created_at)
           : null,
@@ -173,5 +193,5 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     imported++
   }
 
-  return NextResponse.json({ imported, skipped }, { headers: cors })
+  return NextResponse.json({ imported, skipped, updated }, { headers: cors })
 }

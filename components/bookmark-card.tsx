@@ -502,9 +502,9 @@ export default function BookmarkCard({ bookmark }: BookmarkCardProps) {
   const [expanded, setExpanded] = useState(false)
   const [editingCategories, setEditingCategories] = useState(false)
 
-  const tweetUrl = (bookmark.authorHandle && bookmark.authorHandle !== 'unknown')
-    ? `https://twitter.com/${bookmark.authorHandle}/status/${bookmark.tweetId}`
-    : `https://twitter.com/i/web/status/${bookmark.tweetId}`
+  const tweetUrl = bookmark.tweetId
+    ? `https://x.com/i/web/status/${bookmark.tweetId}`
+    : ''
   const firstMedia = bookmark.mediaItems[0] ?? null
   const hasMedia = bookmark.mediaItems.length > 0
   const dateStr = formatDate(bookmark.tweetCreatedAt ?? bookmark.importedAt ?? null)
@@ -516,7 +516,7 @@ export default function BookmarkCard({ bookmark }: BookmarkCardProps) {
   // Show link preview only when there's no real media attached
   const previewUrl = !hasMedia && tcoUrls.length > 0 ? tcoUrls[tcoUrls.length - 1] : null
 
-  const TEXT_LIMIT = 280
+  const TEXT_LIMIT = 500
   const isLong = cleanText.length > TEXT_LIMIT
   const displayText = expanded || !isLong ? cleanText : cleanText.slice(0, TEXT_LIMIT)
 
@@ -559,8 +559,18 @@ export default function BookmarkCard({ bookmark }: BookmarkCardProps) {
   const isDownloadable = firstMedia !== null &&
     (firstMedia.type === 'photo' || isVideoUrl(firstMedia.url))
 
+  function handleCardClick() {
+    if (tweetUrl) window.open(tweetUrl, '_blank', 'noopener,noreferrer')
+  }
+
   return (
-    <div className="group relative bg-zinc-900 border border-zinc-800 rounded-2xl hover:border-zinc-700 hover:shadow-xl hover:shadow-black/30 transition-all duration-200 overflow-hidden flex flex-col flex-1">
+    <div
+      className="group relative bg-zinc-900 border border-zinc-800 rounded-2xl hover:border-zinc-700 hover:shadow-xl hover:shadow-black/30 transition-all duration-200 overflow-hidden flex flex-col flex-1 cursor-pointer"
+      onClick={handleCardClick}
+      role="link"
+      tabIndex={0}
+      onKeyDown={(e) => { if (e.key === 'Enter') handleCardClick() }}
+    >
 
       {/* Top media — full bleed, no padding */}
       {firstMedia && (
@@ -622,7 +632,7 @@ export default function BookmarkCard({ bookmark }: BookmarkCardProps) {
                 <span>
                   {'… '}
                   <button
-                    onClick={() => setExpanded(true)}
+                    onClick={(e) => { e.stopPropagation(); setExpanded(true) }}
                     className="text-indigo-400 hover:text-indigo-300 transition-colors"
                   >
                     more
@@ -633,7 +643,7 @@ export default function BookmarkCard({ bookmark }: BookmarkCardProps) {
                 <span>
                   {' '}
                   <button
-                    onClick={() => setExpanded(false)}
+                    onClick={(e) => { e.stopPropagation(); setExpanded(false) }}
                     className="text-zinc-500 hover:text-zinc-400 transition-colors text-xs"
                   >
                     less
@@ -670,7 +680,7 @@ export default function BookmarkCard({ bookmark }: BookmarkCardProps) {
           {/* Row 2: edit button — always in DOM to reserve space; invisible until hover */}
           <div className="mt-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
             <button
-              onClick={() => setEditingCategories((v) => !v)}
+              onClick={(e) => { e.stopPropagation(); setEditingCategories((v) => !v) }}
               className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-xs text-zinc-700 hover:text-zinc-300 hover:bg-zinc-800 border border-transparent hover:border-zinc-700 transition-all"
               title="Edit categories"
             >
