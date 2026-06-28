@@ -63,3 +63,28 @@ promo-video/
 
 # Claude Code local settings
 .claude/
+
+# ===== Added by vibe-audit fix =====
+node_modules/
+.pnp/
+.pnp.js
+.env.development.local
+.env.test.local
+.env.production.local
+.env*.local
+dist/
+build/
+.cache/
+.turbo/
+.vercel/
+*.log
+*.swp
+*.swo
+*~
+coverage/
+.nyc_output/
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+.eslintcache
