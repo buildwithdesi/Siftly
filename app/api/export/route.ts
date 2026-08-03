@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { exportAllBookmarksCsv, exportBookmarksJson, exportCategoryAsZip, exportBookmarksHtml, exportBookmarksAnalyzedHtml } from '@/lib/exporter'
+import { exportAllBookmarksCsv, exportBookmarksJson, exportCategoryAsZip, exportBookmarksHtml, exportBookmarksAnalyzedHtml, exportBookmarksMarkdown } from '@/lib/exporter'
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
   const { searchParams } = new URL(request.url)
@@ -117,7 +117,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
   if (type === 'csv') {
     try {
-      const csv = await exportAllBookmarksCsv()
+      const csv = await exportAllBookmarksCsv(ids)
       return new NextResponse(csv, {
         status: 200,
         headers: {
@@ -179,8 +179,24 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     }
   }
 
+  if (type === 'markdown') {
+    try {
+      const md = await exportBookmarksMarkdown(ids)
+      return new NextResponse(md, {
+        status: 200,
+        headers: {
+          'Content-Type': 'text/markdown; charset=utf-8',
+          'Content-Disposition': 'attachment; filename="siftly-bookmarks.md"',
+        },
+      })
+    } catch (err) {
+      console.error('Markdown export error:', err)
+      return NextResponse.json({ error: 'An error occurred' }, { status: 500 })
+    }
+  }
+
   return NextResponse.json(
-    { error: `Unknown export type: ${type}. Use csv, json, html, or html-analyzed.` },
+    { error: `Unknown export type: ${type}. Use csv, json, html, html-analyzed, or markdown.` },
     { status: 400 }
   )
 }

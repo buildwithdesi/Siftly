@@ -15,6 +15,7 @@ import {
   Bookmark,
   ImageOff,
   Sparkles,
+  Brain,
 } from 'lucide-react'
 import * as Select from '@radix-ui/react-select'
 import type { BookmarkWithMedia, BookmarksResponse, Category } from '@/lib/types'
@@ -299,12 +300,13 @@ function ExportButton({ label, icon, onClick, disabled, loading, className }: Ex
 
 interface ConfirmModalProps {
   total: number
-  exportType: 'html' | 'html-analyzed' | 'csv' | 'json'
+  exportType: 'html' | 'html-analyzed' | 'csv' | 'json' | 'markdown' | 'all'
   onConfirm: () => void
   onCancel: () => void
 }
 
 function ConfirmModal({ total, exportType, onConfirm, onCancel }: ConfirmModalProps) {
+  const formatLabel = exportType === 'all' ? 'CSV + JSON + HTML' : exportType.toUpperCase()
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4" role="dialog" aria-modal="true">
       <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onCancel} />
@@ -313,7 +315,7 @@ function ConfirmModal({ total, exportType, onConfirm, onCancel }: ConfirmModalPr
         <p className="text-sm text-zinc-400 mb-5">
           No bookmarks are selected. This will export all{' '}
           <span className="text-zinc-200 font-medium">{total.toLocaleString()}</span>{' '}
-          bookmarks as <span className="text-indigo-300 font-medium uppercase">{exportType}</span>.
+          bookmarks as <span className="text-indigo-300 font-medium">{formatLabel}</span>.
         </p>
         <div className="flex items-center justify-end gap-2.5">
           <button
@@ -353,10 +355,12 @@ export default function ExportPage() {
 
   // Selection state
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  const [selectAllDb, setSelectAllDb] = useState(false)
 
   // Export state
-  const [exportingType, setExportingType] = useState<'html' | 'html-analyzed' | 'csv' | 'json' | null>(null)
-  const [confirmExport, setConfirmExport] = useState<'html' | 'html-analyzed' | 'csv' | 'json' | null>(null)
+  const [exportingType, setExportingType] = useState<'html' | 'html-analyzed' | 'csv' | 'json' | 'markdown' | null>(null)
+  const [confirmExport, setConfirmExport] = useState<'html' | 'html-analyzed' | 'csv' | 'json' | 'markdown' | 'all' | null>(null)
+  const [exportingAll, setExportingAll] = useState(false)
 
   // Title for HTML export
   const [exportTitle, setExportTitle] = useState('My Curated Bookmarks')
@@ -410,8 +414,13 @@ export default function ExportPage() {
         setBookmarks(data.bookmarks)
         // Clear selection when filters change
         setSelectedIds(new Set())
+        setSelectAllDb(false)
       } else {
-        setBookmarks((prev) => [...prev, ...data.bookmarks])
+        setBookmarks((prev) => {
+          const existingIds = new Set(prev.map((b) => b.id))
+          const deduped = data.bookmarks.filter((b: BookmarkWithMedia) => !existingIds.has(b.id))
+          return [...prev, ...deduped]
+        })
       }
       setTotal(data.total)
       setOffset(currentOffset + data.bookmarks.length)
@@ -452,10 +461,15 @@ export default function ExportPage() {
 
   function selectAll() {
     setSelectedIds(new Set(bookmarks.map((b) => b.id)))
+    // If there are more bookmarks in the DB than loaded, flag to export ALL
+    if (total > bookmarks.length) {
+      setSelectAllDb(true)
+    }
   }
 
   function deselectAll() {
     setSelectedIds(new Set())
+    setSelectAllDb(false)
   }
 
   function selectAllInCategory() {
@@ -471,7 +485,7 @@ export default function ExportPage() {
 
   // ── Export logic ──────────────────────────────────────────────────────────────
 
-  async function doExport(type: 'html' | 'html-analyzed' | 'csv' | 'json', ids: string[]) {
+  async function doExport(type: 'html' | 'html-analyzed' | 'csv' | 'json' | 'markdown', ids: string[]) {
     setExportingType(type)
     setConfirmExport(null)
 
@@ -496,7 +510,7 @@ export default function ExportPage() {
       // Derive filename from Content-Disposition or fall back to default
       const disposition = res.headers.get('Content-Disposition') ?? ''
       const filenameMatch = disposition.match(/filename="?([^"]+)"?/)
-      const ext = type === 'html' ? 'html' : type === 'csv' ? 'csv' : 'json'
+      const ext = type === 'html' || type === 'html-analyzed' ? 'html' : type === 'csv' ? 'csv' : type === 'markdown' ? 'md' : 'json'
       const filename = filenameMatch?.[1] ?? `siftly-bookmarks.${ext}`
 
       // Trigger file download
@@ -518,7 +532,12 @@ export default function ExportPage() {
     }
   }
 
-  function handleExport(type: 'html' | 'html-analyzed' | 'csv' | 'json') {
+  function handleExport(type: 'html' | 'html-analyzed' | 'csv' | 'json' | 'markdown') {
+    // selectAllDb = true means user wants ALL bookmarks from DB, send empty array
+    if (selectAllDb) {
+      doExport(type, [])
+      return
+    }
     const ids = Array.from(selectedIds)
     if (ids.length === 0) {
       // Nothing selected — confirm before exporting all
@@ -528,6 +547,29 @@ export default function ExportPage() {
     doExport(type, ids)
   }
 
+  async function doExportAllFormats(ids: string[]) {
+    setExportingAll(true)
+    setConfirmExport(null)
+    const types: ('csv' | 'json' | 'html')[] = ['csv', 'json', 'html']
+    for (const type of types) {
+      await doExport(type, ids)
+    }
+    setExportingAll(false)
+  }
+
+  function handleExportAll() {
+    if (selectAllDb) {
+      doExportAllFormats([])
+      return
+    }
+    const ids = Array.from(selectedIds)
+    if (ids.length === 0) {
+      setConfirmExport('all')
+      return
+    }
+    doExportAllFormats(ids)
+  }
+
   // ── Category options for the dropdown ─────────────────────────────────────────
 
   const categoryOptions = categories.map((c) => ({
@@ -535,7 +577,7 @@ export default function ExportPage() {
     value: c.slug,
   }))
 
-  const isExporting = exportingType !== null
+  const isExporting = exportingType !== null || exportingAll
 
   return (
     <div className="flex flex-col h-full">
@@ -611,6 +653,27 @@ export default function ExportPage() {
                 disabled={isExporting}
                 loading={exportingType === 'json'}
               />
+              <ExportButton
+                label="AI-Ready (.md)"
+                icon={<Brain size={14} />}
+                onClick={() => handleExport('markdown')}
+                disabled={isExporting}
+                loading={exportingType === 'markdown'}
+                className="!bg-cyan-600/20 !border-cyan-500/30 !text-cyan-300 hover:!bg-cyan-600/30 hover:!border-cyan-500/50"
+              />
+
+              {/* Divider */}
+              <div className="h-6 w-px bg-zinc-800 shrink-0 hidden sm:block" />
+
+              {/* Export all formats */}
+              <ExportButton
+                label="All Formats"
+                icon={<Download size={14} />}
+                onClick={handleExportAll}
+                disabled={isExporting || exportingAll}
+                loading={exportingAll}
+                className="!bg-emerald-600 hover:!bg-emerald-500 !shadow-emerald-500/20 hover:!shadow-emerald-500/30"
+              />
             </div>
           </div>
 
@@ -619,16 +682,28 @@ export default function ExportPage() {
 
             {/* Selection count badge */}
             <span className="text-sm text-zinc-500 shrink-0">
-              {selectedCount > 0 ? (
+              {selectAllDb ? (
+                <>
+                  <span className="text-emerald-300 font-semibold">All {total.toLocaleString()}</span>
+                  <span className="text-zinc-600"> bookmarks selected for export</span>
+                </>
+              ) : selectedCount > 0 ? (
                 <>
                   <span className="text-indigo-300 font-semibold">{selectedCount.toLocaleString()}</span>
                   <span className="text-zinc-600"> of </span>
-                  <span className="text-zinc-300 font-medium">{bookmarks.length.toLocaleString()}</span>
+                  <span className="text-zinc-300 font-medium">{total.toLocaleString()}</span>
                   <span className="text-zinc-600"> selected</span>
                 </>
               ) : (
                 <span className="text-zinc-600">
-                  {loading ? 'Loading…' : `${total.toLocaleString()} bookmark${total !== 1 ? 's' : ''}`}
+                  {loading ? 'Loading…' : (
+                    <>
+                      {total.toLocaleString()} bookmark{total !== 1 ? 's' : ''}
+                      {total > bookmarks.length && (
+                        <span className="text-zinc-700"> · click Select All to export all {total.toLocaleString()}</span>
+                      )}
+                    </>
+                  )}
                 </span>
               )}
             </span>
@@ -636,11 +711,11 @@ export default function ExportPage() {
             {/* Select / deselect buttons */}
             <div className="flex items-center gap-1.5">
               <button
-                onClick={allSelected ? deselectAll : selectAll}
+                onClick={(allSelected || selectAllDb) ? deselectAll : selectAll}
                 disabled={bookmarks.length === 0}
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-zinc-900 border border-zinc-800 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200 disabled:opacity-30 disabled:cursor-not-allowed transition-all"
               >
-                {allSelected ? (
+                {(allSelected || selectAllDb) ? (
                   <>
                     <CheckSquare size={12} className="text-indigo-400" />
                     Deselect all
@@ -648,7 +723,7 @@ export default function ExportPage() {
                 ) : (
                   <>
                     <Square size={12} />
-                    Select all
+                    Select all{hasMore ? ` (${total.toLocaleString()})` : ''}
                   </>
                 )}
               </button>
@@ -781,8 +856,12 @@ export default function ExportPage() {
           total={total}
           exportType={confirmExport}
           onConfirm={() => {
-            // Export all: send empty array → server interprets as "all"
-            doExport(confirmExport, [])
+            if (confirmExport === 'all') {
+              doExportAllFormats([])
+            } else {
+              // Export all: send empty array → server interprets as "all"
+              doExport(confirmExport, [])
+            }
           }}
           onCancel={() => setConfirmExport(null)}
         />

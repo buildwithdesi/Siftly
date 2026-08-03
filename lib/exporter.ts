@@ -13,6 +13,8 @@ interface BookmarkRow {
   source: string
   tweetCreatedAt: Date | null
   importedAt: Date
+  rawJson: string
+  entities: string | null
   mediaItems: MediaItemRow[]
   categories: CategoryJoin[]
 }
@@ -146,8 +148,12 @@ export async function exportCategoryAsZip(categorySlug: string): Promise<Buffer>
   return buffer
 }
 
-export async function exportAllBookmarksCsv(): Promise<string> {
-  const bookmarks = await fetchBookmarksFull()
+export async function exportAllBookmarksCsv(bookmarkIds?: string[]): Promise<string> {
+  const where = bookmarkIds && bookmarkIds.length > 0
+    ? { id: { in: bookmarkIds } }
+    : undefined
+
+  const bookmarks = await fetchBookmarksFull(where)
 
   const headers = buildCsvRow([
     'tweetId',
@@ -209,6 +215,108 @@ export async function exportBookmarksJson(bookmarkIds?: string[]): Promise<strin
 }
 
 // ---------------------------------------------------------------------------
+// Markdown Export (AI-optimized)
+// ---------------------------------------------------------------------------
+
+export async function exportBookmarksMarkdown(bookmarkIds?: string[]): Promise<string> {
+  const where = bookmarkIds && bookmarkIds.length > 0
+    ? { id: { in: bookmarkIds } }
+    : undefined
+
+  const bookmarks = await fetchBookmarksFull(where)
+
+  // Build category summary counts
+  const categoryCounts = new Map<string, number>()
+  for (const b of bookmarks) {
+    for (const c of b.categories) {
+      categoryCounts.set(c.category.name, (categoryCounts.get(c.category.name) ?? 0) + 1)
+    }
+  }
+  const uncategorizedCount = bookmarks.filter((b) => b.categories.length === 0).length
+
+  const lines: string[] = []
+
+  // Header
+  lines.push('# Siftly Bookmark Export')
+  lines.push('')
+  lines.push(`**Total bookmarks:** ${bookmarks.length}`)
+  lines.push(`**Export date:** ${new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}`)
+  lines.push('')
+
+  // Category summary
+  if (categoryCounts.size > 0) {
+    lines.push('## Categories')
+    lines.push('')
+    const sorted = [...categoryCounts.entries()].sort((a, b) => b[1] - a[1])
+    for (const [name, count] of sorted) {
+      lines.push(`- ${name} (${count})`)
+    }
+    if (uncategorizedCount > 0) {
+      lines.push(`- Uncategorized (${uncategorizedCount})`)
+    }
+    lines.push('')
+  }
+
+  lines.push('---')
+  lines.push('')
+
+  // Each bookmark
+  for (let i = 0; i < bookmarks.length; i++) {
+    const b = bookmarks[i]
+    const dateStr = b.tweetCreatedAt
+      ? b.tweetCreatedAt.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })
+      : ''
+    const author = b.authorHandle !== 'unknown' ? `@${b.authorHandle}` : 'Unknown author'
+    const heading = dateStr ? `${author} — ${dateStr}` : author
+
+    lines.push(`### ${i + 1}. ${heading}`)
+    lines.push('')
+
+    // Tweet text — expand t.co URLs for readability
+    const expandedText = expandTweetUrls(b.text, b.rawJson)
+    // Strip remaining t.co links
+    const cleanText = expandedText.replace(/https?:\/\/t\.co\/[^\s]+/g, '').trim()
+    if (cleanText) {
+      lines.push(cleanText)
+      lines.push('')
+    }
+
+    // Categories
+    if (b.categories.length > 0) {
+      const cats = b.categories.map((c) => c.category.name).join(', ')
+      lines.push(`**Categories:** ${cats}`)
+    }
+
+    // Tweet URL
+    lines.push(`**Tweet:** https://x.com/i/web/status/${b.tweetId}`)
+
+    // Entities — links, mentions, tools
+    const ent = parseBookmarkEntities(b.entities, b.rawJson)
+    if (ent.urls.length > 0) {
+      lines.push(`**Links:** ${ent.urls.join(', ')}`)
+    }
+    if (ent.mentions.length > 0) {
+      lines.push(`**Mentions:** ${ent.mentions.map((m) => `@${m}`).join(', ')}`)
+    }
+    if (ent.tools.length > 0) {
+      lines.push(`**Tools:** ${ent.tools.join(', ')}`)
+    }
+
+    // Media
+    if (b.mediaItems.length > 0) {
+      const mediaDescriptions = b.mediaItems.map((m) => `[${m.type}](${m.url})`).join(', ')
+      lines.push(`**Media:** ${mediaDescriptions}`)
+    }
+
+    lines.push('')
+    lines.push('---')
+    lines.push('')
+  }
+
+  return lines.join('\n')
+}
+
+// ---------------------------------------------------------------------------
 // HTML Export
 // ---------------------------------------------------------------------------
 
@@ -219,6 +327,151 @@ function escapeHtml(raw: string): string {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;')
+}
+
+interface ParsedEntities {
+  hashtags: string[]
+  urls: string[]
+  mentions: string[]
+  tools: string[]
+}
+
+/** Replace t.co short URLs in tweet text with their expanded URLs from entities data. */
+function expandTweetUrls(text: string, rawJson: string): string {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const tweet = JSON.parse(rawJson) as any
+    const urlEntities: { url?: string; expanded_url?: string }[] =
+      tweet?.entities?.urls ?? tweet?.legacy?.entities?.urls ?? []
+    for (const entity of urlEntities) {
+      if (entity.url && entity.expanded_url) {
+        text = text.replaceAll(entity.url, entity.expanded_url)
+      }
+    }
+  } catch { /* ignore parse errors */ }
+  return text
+}
+
+/** Convert @mentions and URLs in text to clickable HTML links. */
+function linkifyTweetText(text: string): string {
+  const segments: { type: 'text' | 'mention' | 'url'; value: string }[] = []
+  const pattern = /(@[A-Za-z0-9_]+)|(https?:\/\/[^\s)\]>]+)/g
+  let lastIndex = 0
+  let match: RegExpExecArray | null
+
+  while ((match = pattern.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      segments.push({ type: 'text', value: text.slice(lastIndex, match.index) })
+    }
+    if (match[1]) {
+      segments.push({ type: 'mention', value: match[1] })
+    } else if (match[2]) {
+      segments.push({ type: 'url', value: match[2] })
+    }
+    lastIndex = pattern.lastIndex
+  }
+
+  if (lastIndex < text.length) {
+    segments.push({ type: 'text', value: text.slice(lastIndex) })
+  }
+
+  return segments.map((seg) => {
+    if (seg.type === 'mention') {
+      const handle = seg.value.slice(1)
+      return `<a href="https://x.com/${escapeHtml(handle)}" target="_blank" rel="noopener noreferrer">${escapeHtml(seg.value)}</a>`
+    }
+    if (seg.type === 'url') {
+      const displayUrl = seg.value.replace(/^https?:\/\//, '').replace(/\/$/, '')
+      return `<a href="${escapeHtml(seg.value)}" target="_blank" rel="noopener noreferrer">${escapeHtml(displayUrl)}</a>`
+    }
+    return escapeHtml(seg.value)
+  }).join('')
+}
+
+/** Extract entity data from stored entities JSON or rawJson fallback. */
+function parseBookmarkEntities(entities: string | null, rawJson: string): ParsedEntities {
+  const empty: ParsedEntities = { hashtags: [], urls: [], mentions: [], tools: [] }
+
+  if (entities) {
+    try {
+      const parsed = JSON.parse(entities)
+      return {
+        hashtags: Array.isArray(parsed.hashtags) ? parsed.hashtags : [],
+        urls: Array.isArray(parsed.urls) ? parsed.urls : [],
+        mentions: Array.isArray(parsed.mentions) ? parsed.mentions : [],
+        tools: Array.isArray(parsed.tools) ? parsed.tools : [],
+      }
+    } catch { /* fall through */ }
+  }
+
+  // Fallback: extract from rawJson inline (mirrors rawjson-extractor logic)
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const tweet = JSON.parse(rawJson) as any
+    const urlObjs: { expanded_url?: string; url?: string }[] =
+      tweet?.entities?.urls ?? tweet?.legacy?.entities?.urls ?? []
+    const urls = urlObjs
+      .map((u: { expanded_url?: string; url?: string }) => String(u.expanded_url ?? u.url ?? ''))
+      .filter((u: string) => u && !u.includes('twitter.com') && !u.includes('t.co/') && !u.includes('x.com/'))
+    const mentionObjs: { screen_name?: string; username?: string }[] =
+      tweet?.entities?.user_mentions ?? tweet?.legacy?.entities?.user_mentions ?? []
+    const mentions = mentionObjs
+      .map((m: { screen_name?: string; username?: string }) => String(m.screen_name ?? m.username ?? '').toLowerCase())
+      .filter(Boolean)
+    return { hashtags: [], urls, mentions, tools: [] }
+  } catch { /* ignore */ }
+
+  return empty
+}
+
+/** Build HTML for the entities section (mentions, URLs, tools) below the tweet text. */
+function buildEntitiesHtml(ent: ParsedEntities): string {
+  const sections: string[] = []
+
+  if (ent.mentions.length > 0) {
+    const items = ent.mentions.map((h) => {
+      const safe = escapeHtml(h)
+      return `<a class="card-entities__item" href="https://x.com/${safe}" target="_blank" rel="noopener noreferrer">@${safe}</a>`
+    }).join('')
+    sections.push(`
+      <div class="card-entities__section">
+        <span class="card-entities__label">Mentions</span>
+        <div class="card-entities__list">${items}</div>
+      </div>`)
+  }
+
+  if (ent.urls.length > 0) {
+    const items = ent.urls.map((url) => {
+      const safeUrl = escapeHtml(url)
+      let displayUrl: string
+      try {
+        const parsed = new URL(url)
+        displayUrl = escapeHtml(parsed.hostname.replace(/^www\./, '') + (parsed.pathname !== '/' ? parsed.pathname : ''))
+      } catch {
+        displayUrl = safeUrl.slice(0, 40)
+      }
+      return `<a class="card-entities__item card-entities__item--url" href="${safeUrl}" target="_blank" rel="noopener noreferrer">${displayUrl}</a>`
+    }).join('')
+    sections.push(`
+      <div class="card-entities__section">
+        <span class="card-entities__label">Links</span>
+        <div class="card-entities__list">${items}</div>
+      </div>`)
+  }
+
+  if (ent.tools.length > 0) {
+    const items = ent.tools.map((t) =>
+      `<span class="card-entities__item card-entities__item--tool">${escapeHtml(t)}</span>`
+    ).join('')
+    sections.push(`
+      <div class="card-entities__section">
+        <span class="card-entities__label">Tools &amp; Products</span>
+        <div class="card-entities__list">${items}</div>
+      </div>`)
+  }
+
+  if (sections.length === 0) return ''
+  return `<div class="card-entities">${sections.join('')}</div>`
 }
 
 function formatExportDate(date: Date): string {
@@ -452,12 +705,68 @@ function buildHtmlStyles(): string {
       font-size: 0.9rem;
       line-height: 1.65;
       color: #D4D4D8;
-      display: -webkit-box;
-      -webkit-line-clamp: 6;
-      -webkit-box-orient: vertical;
-      overflow: hidden;
       word-break: break-word;
       white-space: pre-wrap;
+    }
+
+    .card-text a { color: #A855F7; text-decoration: none; }
+    .card-text a:hover { text-decoration: underline; }
+
+    /* Entities section */
+    .card-entities {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+
+    .card-entities__section {
+      display: flex;
+      flex-direction: column;
+      gap: 0.3rem;
+    }
+
+    .card-entities__label {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.65rem;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: #71717A;
+    }
+
+    .card-entities__list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.3rem;
+    }
+
+    .card-entities__item {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.72rem;
+      color: #A855F7;
+      background: rgba(168, 85, 247, 0.06);
+      border: 1px solid rgba(168, 85, 247, 0.12);
+      border-radius: 6px;
+      padding: 0.15rem 0.45rem;
+      text-decoration: none;
+      white-space: nowrap;
+    }
+
+    .card-entities__item:hover { background: rgba(168, 85, 247, 0.12); text-decoration: none; }
+
+    .card-entities__item--url {
+      color: #06B6D4;
+      background: rgba(6, 182, 212, 0.06);
+      border-color: rgba(6, 182, 212, 0.12);
+      white-space: normal;
+      word-break: break-all;
+    }
+
+    .card-entities__item--url:hover { background: rgba(6, 182, 212, 0.12); }
+
+    .card-entities__item--tool {
+      color: #F5A623;
+      background: rgba(245, 166, 35, 0.06);
+      border-color: rgba(245, 166, 35, 0.12);
     }
 
     /* Card thumbnail */
@@ -564,8 +873,14 @@ function buildBookmarkCardHtml(bookmark: BookmarkRow, animationDelay: number): s
   )
   const authorName = escapeHtml(bookmark.authorName || bookmark.authorHandle)
   const handle = escapeHtml(bookmark.authorHandle)
-  const tweetText = escapeHtml(bookmark.text)
+  // Expand t.co URLs to real URLs, then linkify @mentions and URLs
+  const expandedText = expandTweetUrls(bookmark.text, bookmark.rawJson)
+  const tweetText = linkifyTweetText(expandedText)
   const dateStr = formatTweetDate(bookmark.tweetCreatedAt)
+
+  // Parse entities for structured display
+  const ent = parseBookmarkEntities(bookmark.entities, bookmark.rawJson)
+  const entitiesHtml = buildEntitiesHtml(ent)
 
   // First media item that has a usable URL
   const firstMedia = bookmark.mediaItems.find((m) => m.url)
@@ -609,6 +924,7 @@ function buildBookmarkCardHtml(bookmark: BookmarkRow, animationDelay: number): s
         </div>
       </div>
       <p class="card-text">${tweetText}</p>
+      ${entitiesHtml}
       ${thumbnailHtml}
       ${pillsHtml}
       <div class="card-footer">
@@ -628,23 +944,24 @@ function buildCategorySectionHtml(
   name: string,
   color: string,
   bookmarks: BookmarkRow[],
-  globalCardOffset: number
+  globalCardOffset: number,
+  slug?: string
 ): string {
   const safeColor = escapeHtml(color)
   const safeName = escapeHtml(name)
+  const sectionId = escapeHtml(slug ?? name.toLowerCase().replace(/\s+/g, '-'))
 
   const cardsHtml = bookmarks
     .map((b, i) =>
-      buildBookmarkCardHtml(b, (globalCardOffset + i) * 60)
+      buildBookmarkCardHtml(b, Math.min((globalCardOffset + i) * 60, 3000))
     )
     .join('')
 
   return `
-    <section class="category-section" aria-labelledby="cat-${escapeHtml(name.toLowerCase().replace(/\s+/g, '-'))}">
+    <section class="category-section" id="cat-${sectionId}" aria-labelledby="cat-label-${sectionId}">
       <div class="category-header">
         <span class="category-color-dot" style="background:${safeColor}" aria-hidden="true"></span>
-        <h2 class="category-name"
-            id="cat-${escapeHtml(name.toLowerCase().replace(/\s+/g, '-'))}">
+        <h2 class="category-name" id="cat-label-${sectionId}">
           ${safeName}
         </h2>
         <span class="category-count">${bookmarks.length}</span>
@@ -655,6 +972,291 @@ function buildCategorySectionHtml(
         </div>
       </div>
     </section>`
+}
+
+// ---------------------------------------------------------------------------
+// Enhanced HTML Export: Sidebar, Mindmap, Search, Navigation
+// ---------------------------------------------------------------------------
+
+function buildNavigationStyles(): string {
+  return `
+    /* ── Sidebar + layout ── */
+    .layout { display: flex; max-width: 1440px; margin: 0 auto; }
+
+    .sidebar {
+      width: 250px; flex-shrink: 0;
+      padding: 1.25rem 0.75rem;
+      position: sticky; top: 0; height: 100vh;
+      overflow-y: auto; scrollbar-width: thin;
+      border-right: 1px solid #1E2028;
+      background: #0C0D10;
+    }
+
+    .sidebar__title {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.65rem; letter-spacing: 0.1em;
+      text-transform: uppercase; color: #52525B;
+      padding: 0 0.5rem; margin-bottom: 0.75rem;
+    }
+
+    .sidebar__list { display: flex; flex-direction: column; gap: 2px; }
+
+    .sidebar__divider { height: 1px; background: #1E2028; margin: 0.5rem 0; }
+
+    .sidebar__item {
+      display: flex; align-items: center; gap: 0.5rem;
+      padding: 0.45rem 0.65rem; border-radius: 8px;
+      font-size: 0.8rem; color: #A1A1AA;
+      text-decoration: none; transition: all 0.15s;
+    }
+    .sidebar__item:hover { background: #18191E; color: #E4E4E7; text-decoration: none; }
+    .sidebar__item.active { background: #1E1F26; color: #E4E4E7; font-weight: 600; }
+
+    .sidebar__dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+    .sidebar__name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .sidebar__count { font-family: 'JetBrains Mono', monospace; font-size: 0.65rem; color: #52525B; }
+
+    .content-area { flex: 1; min-width: 0; }
+
+    /* ── Mindmap ── */
+    .mindmap-section {
+      padding: 2.5rem 1.25rem 2rem;
+      border-bottom: 1px solid #1E2028;
+      background: linear-gradient(180deg, #0C0D10 0%, #0A0B0D 100%);
+      text-align: center;
+    }
+
+    .mindmap-label {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.65rem; letter-spacing: 0.1em;
+      text-transform: uppercase; color: #52525B;
+      margin-bottom: 1.25rem;
+    }
+
+    .mindmap-svg { max-width: 900px; width: 100%; margin: 0 auto; display: block; }
+    .mindmap-svg text { font-family: 'Space Grotesk', system-ui, sans-serif; pointer-events: none; }
+    .mindmap-node { transition: opacity 0.2s; }
+    .mindmap-node:hover { opacity: 0.8; }
+    .mindmap-node:hover circle { stroke-width: 2.5; }
+
+    /* ── Search ── */
+    .search-bar {
+      padding: 0.75rem 1.25rem;
+      position: sticky; top: 0; z-index: 10;
+      background: rgba(10, 11, 13, 0.92);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border-bottom: 1px solid #1E2028;
+    }
+
+    .search-wrapper { position: relative; max-width: 360px; }
+
+    .search-input {
+      width: 100%;
+      padding: 0.55rem 0.75rem 0.55rem 2.25rem;
+      border-radius: 10px; border: 1px solid #27272A;
+      background: #131417; color: #E4E4E7;
+      font-size: 0.82rem; font-family: 'Space Grotesk', system-ui, sans-serif;
+      outline: none; transition: border-color 0.2s;
+    }
+    .search-input:focus { border-color: #A855F7; }
+    .search-input::placeholder { color: #52525B; }
+
+    .search-icon {
+      position: absolute; left: 0.65rem; top: 50%;
+      transform: translateY(-50%); color: #52525B;
+      pointer-events: none; line-height: 0;
+    }
+
+    .search-count {
+      position: absolute; right: 0.75rem; top: 50%;
+      transform: translateY(-50%);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.7rem; color: #52525B;
+    }
+
+    /* ── Back to top ── */
+    .back-to-top {
+      position: fixed; bottom: 1.5rem; right: 1.5rem;
+      width: 38px; height: 38px; border-radius: 10px;
+      background: #A855F7; color: #fff; border: none;
+      cursor: pointer; display: flex; align-items: center;
+      justify-content: center; font-size: 1.1rem;
+      opacity: 0; transform: translateY(8px);
+      transition: all 0.25s; z-index: 50;
+      box-shadow: 0 4px 16px rgba(168, 85, 247, 0.3);
+    }
+    .back-to-top.visible { opacity: 1; transform: translateY(0); }
+    .back-to-top:hover { background: #9333EA; }
+
+    /* ── Mobile ── */
+    @media (max-width: 768px) {
+      .sidebar { display: none; }
+      .layout { flex-direction: column; }
+      .mindmap-section { padding: 1.5rem 1rem; }
+    }
+  `
+}
+
+function buildMindmapSvg(
+  categories: { name: string; slug: string; color: string; count: number }[],
+  totalBookmarks: number,
+  title: string
+): string {
+  if (categories.length === 0) return ''
+
+  const count = categories.length
+  const nodeR = count > 14 ? 26 : count > 8 ? 30 : 36
+  const centerR = 44
+
+  const minRadius = centerR + nodeR + 50
+  const circumNeeded = count * (nodeR * 2 + 24)
+  const radius = Math.max(minRadius, Math.round(circumNeeded / (2 * Math.PI)))
+
+  const pad = nodeR + 15
+  const cx = radius + pad
+  const cy = radius + pad
+  const viewW = (radius + pad) * 2
+  const viewH = (radius + pad) * 2
+
+  const lines: string[] = []
+  const nodes: string[] = []
+
+  for (let i = 0; i < count; i++) {
+    const angle = (2 * Math.PI * i) / count - Math.PI / 2
+    const x = Math.round(cx + radius * Math.cos(angle))
+    const y = Math.round(cy + radius * Math.sin(angle))
+    const color = escapeHtml(categories[i].color)
+    lines.push(
+      `<line x1="${cx}" y1="${cy}" x2="${x}" y2="${y}" stroke="${color}" stroke-width="1.5" opacity="0.2" />`
+    )
+  }
+
+  for (let i = 0; i < count; i++) {
+    const cat = categories[i]
+    const angle = (2 * Math.PI * i) / count - Math.PI / 2
+    const x = Math.round(cx + radius * Math.cos(angle))
+    const y = Math.round(cy + radius * Math.sin(angle))
+    const color = escapeHtml(cat.color)
+    const slug = escapeHtml(cat.slug)
+    const maxLen = count > 14 ? 9 : count > 8 ? 12 : 15
+    const name = escapeHtml(cat.name.length > maxLen ? cat.name.slice(0, maxLen - 1) + '\u2026' : cat.name)
+    const fontSize = count > 14 ? 8.5 : count > 8 ? 9.5 : 10.5
+
+    nodes.push(
+      `<g class="mindmap-node" onclick="document.getElementById('cat-${slug}').scrollIntoView({behavior:'smooth',block:'start'})" style="cursor:pointer">
+    <circle cx="${x}" cy="${y}" r="${nodeR}" fill="${color}" fill-opacity="0.08" stroke="${color}" stroke-width="1.5" />
+    <text x="${x}" y="${y - 3}" text-anchor="middle" fill="${color}" font-size="${fontSize}" font-weight="600">${name}</text>
+    <text x="${x}" y="${y + 10}" text-anchor="middle" fill="#71717A" font-size="8.5" font-family="JetBrains Mono, monospace">${cat.count}</text>
+  </g>`
+    )
+  }
+
+  const centerTitle = escapeHtml(title.length > 18 ? title.slice(0, 16) + '\u2026' : title)
+  const centerNode =
+    `<circle cx="${cx}" cy="${cy}" r="${centerR}" fill="#A855F7" fill-opacity="0.06" stroke="#A855F7" stroke-width="2" />
+  <text x="${cx}" y="${cy - 5}" text-anchor="middle" fill="#E4E4E7" font-size="11" font-weight="700">${centerTitle}</text>
+  <text x="${cx}" y="${cy + 9}" text-anchor="middle" fill="#A855F7" font-size="9.5" font-family="JetBrains Mono, monospace">${totalBookmarks} bookmarks</text>`
+
+  return `<svg class="mindmap-svg" viewBox="0 0 ${viewW} ${viewH}" xmlns="http://www.w3.org/2000/svg">
+${lines.join('\n')}
+${centerNode}
+${nodes.join('\n')}
+</svg>`
+}
+
+function buildSidebarHtml(
+  categories: { name: string; slug: string; color: string; count: number }[],
+  uncategorizedCount: number
+): string {
+  const items = categories.map(cat => {
+    const s = escapeHtml(cat.slug)
+    return `<a href="#cat-${s}" class="sidebar__item" data-section="cat-${s}">
+          <span class="sidebar__dot" style="background:${escapeHtml(cat.color)}"></span>
+          <span class="sidebar__name">${escapeHtml(cat.name)}</span>
+          <span class="sidebar__count">${cat.count}</span>
+        </a>`
+  }).join('\n        ')
+
+  const uncatItem = uncategorizedCount > 0
+    ? `<a href="#cat-uncategorized" class="sidebar__item" data-section="cat-uncategorized">
+          <span class="sidebar__dot" style="background:#71717A"></span>
+          <span class="sidebar__name">Uncategorized</span>
+          <span class="sidebar__count">${uncategorizedCount}</span>
+        </a>`
+    : ''
+
+  return `
+    <nav class="sidebar" aria-label="Category navigation">
+      <div class="sidebar__title">Navigate</div>
+      <div class="sidebar__list">
+        <a href="#mindmap" class="sidebar__item" data-section="mindmap">
+          <span class="sidebar__dot" style="background:#A855F7"></span>
+          <span class="sidebar__name">Mindmap</span>
+        </a>
+        <div class="sidebar__divider"></div>
+        ${items}
+        ${uncatItem}
+      </div>
+    </nav>`
+}
+
+function buildExportScript(): string {
+  return `<script>
+(function(){
+  // ── Search ──
+  var si = document.getElementById('export-search');
+  var sc = document.getElementById('search-count');
+  if (si) {
+    var dt;
+    si.addEventListener('input', function(){
+      clearTimeout(dt);
+      dt = setTimeout(function(){
+        var q = si.value.toLowerCase().trim();
+        var cards = document.querySelectorAll('.bookmark-card');
+        var shown = 0;
+        cards.forEach(function(c){
+          var vis = !q || c.textContent.toLowerCase().indexOf(q) !== -1;
+          c.style.display = vis ? '' : 'none';
+          if (vis) shown++;
+        });
+        document.querySelectorAll('.category-section').forEach(function(s){
+          var vc = s.querySelectorAll('.bookmark-card:not([style*="display: none"])');
+          s.style.display = (vc.length > 0 || !q) ? '' : 'none';
+        });
+        if (sc) sc.textContent = q ? shown + ' found' : '';
+      }, 200);
+    });
+  }
+
+  // ── Back to top ──
+  var btn = document.getElementById('back-to-top');
+  if (btn) {
+    window.addEventListener('scroll', function(){
+      btn.classList.toggle('visible', window.scrollY > 400);
+    });
+    btn.addEventListener('click', function(){
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    });
+  }
+
+  // ── Active sidebar on scroll ──
+  var items = document.querySelectorAll('.sidebar__item[data-section]');
+  var sects = document.querySelectorAll('.category-section[id], #mindmap');
+  if (items.length && sects.length && window.IntersectionObserver) {
+    var obs = new IntersectionObserver(function(entries){
+      entries.forEach(function(e){
+        if (e.isIntersecting) {
+          items.forEach(function(it){
+            it.classList.toggle('active', it.getAttribute('data-section') === e.target.id);
+          });
+        }
+      });
+    }, { rootMargin: '-15% 0px -75% 0px' });
+    sects.forEach(function(s){ obs.observe(s); });
+  }
+})();
+</script>`
 }
 
 export async function exportBookmarksHtml(
@@ -673,7 +1275,7 @@ export async function exportBookmarksHtml(
 
   // Group bookmarks by category. Bookmarks with multiple categories appear
   // under each category. Bookmarks with no categories go to "Uncategorized".
-  const categoryMap = new Map<string, { name: string; color: string; bookmarks: BookmarkRow[] }>()
+  const categoryMap = new Map<string, { name: string; slug: string; color: string; bookmarks: BookmarkRow[] }>()
 
   for (const bookmark of bookmarks) {
     if (bookmark.categories.length === 0) {
@@ -683,6 +1285,7 @@ export async function exportBookmarksHtml(
       if (!categoryMap.has(category.slug)) {
         categoryMap.set(category.slug, {
           name: category.name,
+          slug: category.slug,
           color: category.color,
           bookmarks: [],
         })
@@ -699,21 +1302,34 @@ export async function exportBookmarksHtml(
 
   for (const entry of categoryMap.values()) {
     sectionsHtml.push(
-      buildCategorySectionHtml(entry.name, entry.color, entry.bookmarks, cardOffset)
+      buildCategorySectionHtml(entry.name, entry.color, entry.bookmarks, cardOffset, entry.slug)
     )
     cardOffset += entry.bookmarks.length
   }
 
   if (uncategorized.length > 0) {
     sectionsHtml.push(
-      buildCategorySectionHtml('Uncategorized', '#71717A', uncategorized, cardOffset)
+      buildCategorySectionHtml('Uncategorized', '#71717A', uncategorized, cardOffset, 'uncategorized')
     )
   }
 
+  // Navigation data
+  const categoryList = Array.from(categoryMap.values()).map(c => ({
+    name: c.name,
+    slug: c.slug,
+    color: c.color,
+    count: c.bookmarks.length,
+  }))
   const categoryCount = categoryMap.size + (uncategorized.length > 0 ? 1 : 0)
+
+  const mindmapSvg = buildMindmapSvg(categoryList, bookmarks.length, exportTitle)
+  const sidebarHtml = buildSidebarHtml(categoryList, uncategorized.length)
+
   const safeTitle = escapeHtml(exportTitle)
   const safeDateLong = escapeHtml(formatExportDate(exportDate))
   const safeDateIso = exportDate.toISOString()
+
+  const searchIconSvg = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>'
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -725,6 +1341,7 @@ export async function exportBookmarksHtml(
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet" />
   <style>${buildHtmlStyles()}</style>
+  <style>${buildNavigationStyles()}</style>
 </head>
 <body>
   <header class="hero" role="banner">
@@ -749,8 +1366,93 @@ export async function exportBookmarksHtml(
     </div>
   </header>
 
+  ${mindmapSvg ? `<section class="mindmap-section" id="mindmap">
+    <div class="mindmap-label">Bookmark Mindmap &mdash; click a category to jump</div>
+    ${mindmapSvg}
+  </section>` : ''}
+
+  <div class="layout">
+    ${sidebarHtml}
+    <div class="content-area">
+      <div class="search-bar">
+        <div class="search-wrapper">
+          <span class="search-icon">${searchIconSvg}</span>
+          <input type="text" id="export-search" class="search-input"
+                 placeholder="Search ${bookmarks.length.toLocaleString()} bookmarks\u2026" autocomplete="off" />
+          <span class="search-count" id="search-count"></span>
+        </div>
+      </div>
+      <main class="main" id="main-content">
+        ${sectionsHtml.join('\n')}
+      </main>
+    </div>
+  </div>
+
+  <footer class="site-footer" role="contentinfo">
+    Exported from <a href="https://github.com/viperrcrypto/siftly" target="_blank" rel="noopener noreferrer">Siftly</a>
+    &nbsp;&mdash;&nbsp;
+    <time datetime="${safeDateIso}">${safeDateLong}</time>
+  </footer>
+
+  <button class="back-to-top" id="back-to-top" aria-label="Back to top" title="Back to top">&#8593;</button>
+
+  ${buildExportScript()}
+</body>
+</html>`
+}
+
+// ---------------------------------------------------------------------------
+// Per-Category HTML ZIP Export
+// ---------------------------------------------------------------------------
+
+function buildSingleCategoryHtml(
+  categoryName: string,
+  categoryColor: string,
+  bookmarks: BookmarkRow[],
+  exportDate: Date
+): string {
+  const safeTitle = escapeHtml(categoryName)
+  const safeDateLong = escapeHtml(formatExportDate(exportDate))
+  const safeDateIso = exportDate.toISOString()
+
+  const cardsHtml = bookmarks
+    .map((b, i) => buildBookmarkCardHtml(b, i * 60))
+    .join('')
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>${safeTitle} — Siftly Export</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet" />
+  <style>${buildHtmlStyles()}</style>
+</head>
+<body>
+  <header class="hero" role="banner">
+    <div class="hero__brand">
+      <span class="hero__brand-dot" aria-hidden="true" style="background:${escapeHtml(categoryColor)}"></span>
+      Exported from Siftly
+    </div>
+    <h1 class="hero__title">${safeTitle}</h1>
+    <div class="hero__meta" role="list">
+      <div class="hero__meta-item" role="listitem">
+        <span>Bookmarks</span>
+        <span class="hero__meta-value">${bookmarks.length}</span>
+      </div>
+      <div class="hero__meta-item" role="listitem">
+        <span>Exported</span>
+        <time class="hero__meta-value" datetime="${safeDateIso}">${safeDateLong}</time>
+      </div>
+    </div>
+  </header>
+
   <main class="main" id="main-content">
-    ${sectionsHtml.join('\n')}
+    <div class="bookmark-grid" role="list">
+      ${cardsHtml}
+    </div>
   </main>
 
   <footer class="site-footer" role="contentinfo">
@@ -760,6 +1462,54 @@ export async function exportBookmarksHtml(
   </footer>
 </body>
 </html>`
+}
+
+export async function exportCategoryHtmlZip(): Promise<Buffer> {
+  const categories = await prisma.category.findMany({
+    orderBy: { name: 'asc' },
+  })
+
+  const allBookmarks = await fetchBookmarksFull()
+  const exportDate = new Date()
+
+  // Group bookmarks by category slug
+  const categoryMap = new Map<string, { name: string; color: string; bookmarks: BookmarkRow[] }>()
+
+  for (const cat of categories) {
+    categoryMap.set(cat.slug, { name: cat.name, color: cat.color, bookmarks: [] })
+  }
+
+  const uncategorized: BookmarkRow[] = []
+
+  for (const bookmark of allBookmarks) {
+    if (bookmark.categories.length === 0) {
+      uncategorized.push(bookmark)
+      continue
+    }
+    for (const { category } of bookmark.categories) {
+      const entry = categoryMap.get(category.slug)
+      if (entry) {
+        entry.bookmarks.push(bookmark)
+      }
+    }
+  }
+
+  const JSZip = (await import('jszip')).default
+  const zip = new JSZip()
+
+  // One HTML file per category (skip empty categories)
+  for (const [slug, entry] of categoryMap) {
+    if (entry.bookmarks.length === 0) continue
+    const html = buildSingleCategoryHtml(entry.name, entry.color, entry.bookmarks, exportDate)
+    zip.file(`${slug}.html`, html)
+  }
+
+  if (uncategorized.length > 0) {
+    const html = buildSingleCategoryHtml('Uncategorized', '#71717A', uncategorized, exportDate)
+    zip.file('uncategorized.html', html)
+  }
+
+  return zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' })
 }
 
 // ---------------------------------------------------------------------------
